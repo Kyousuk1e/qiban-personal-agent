@@ -133,7 +133,10 @@ def create_app(store=None, start_worker=True):
         response.headers.update(
             {
                 "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
+                # no-referrer makes browser form POSTs use Origin: null, which
+                # our origin guard correctly rejects. Preserve same-origin
+                # metadata without sending referrers to external sites.
+                "Referrer-Policy": "same-origin",
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": "default-src 'self'; script-src 'none'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             }

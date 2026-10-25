@@ -121,6 +121,35 @@ class AgentTests(unittest.TestCase):
         self.client.delete(f"/api/memories/{memory['id']}", headers=self.headers)
         self.assertEqual(self.store.all("SELECT * FROM memories"), [])
 
+    def test_browser_chat_origin_and_csrf(self):
+        page = self.client.get("/")
+        self.assertEqual(page.headers["Referrer-Policy"], "same-origin")
+        token = re.search(r'name="_csrf" value="([^"]+)"', page.text)[1]
+        form = {"_csrf": token, "content": "/files"}
+        for origin in ["null", "https://evil.example"]:
+            response = self.client.post(
+                "/chat", data=form, headers={"Origin": origin}, follow_redirects=False
+            )
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.store.all("SELECT * FROM tasks"), [])
+        response = self.client.post(
+            "/chat",
+            data=form,
+            headers={"Origin": "http://127.0.0.1"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        asyncio.run(process_one(self.store))
+        self.assertIn("演示模式", self.client.get(response.headers["location"]).text)
+        self.assertEqual(
+            self.client.post(
+                "/chat",
+                data={"_csrf": "wrong", "content": "bad"},
+                headers={"Origin": "http://127.0.0.1"},
+            ).status_code,
+            403,
+        )
+
     def test_demo_chat_and_data_reopen(self):
         cid = self.store.conversation()["id"]
         task = self.store.submit(cid, "/note 测试笔记")
