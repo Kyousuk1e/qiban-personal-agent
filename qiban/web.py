@@ -81,7 +81,7 @@ def create_app(store=None, start_worker=True):
             online = False
         return {
             "conversations": store.all(
-                "SELECT * FROM conversations ORDER BY created_at DESC"
+                "SELECT c.*, b.parent_id FROM conversations c LEFT JOIN conversation_branches b ON b.conversation_id=c.id ORDER BY c.created_at DESC"
             ),
             "memories": store.all("SELECT * FROM memories ORDER BY updated_at DESC"),
             "tasks": store.all(
@@ -177,6 +177,10 @@ def create_app(store=None, start_worker=True):
             "pending": None,
             "error": None,
             "uploaded": None,
+            "conversation": None,
+            "context_files": [],
+            "parent": None,
+            "last_task": None,
             "labels": {
                 "queued": "待执行",
                 "running": "执行中",
@@ -311,7 +315,53 @@ def create_app(store=None, start_worker=True):
             "SELECT * FROM tasks WHERE conversation_id=? AND status IN ('queued','running')",
             (cid,),
         )
-        return render(request, active=cid, messages=api_messages(cid), pending=pending)
+        conversation = store.one("SELECT * FROM conversations WHERE id=?", (cid,))
+        if not conversation:
+            raise ValueError("对话不存在。")
+        return render(
+            request,
+            active=cid,
+            conversation=conversation,
+            last_task=store.one(
+                "SELECT * FROM tasks WHERE conversation_id=? ORDER BY rowid DESC LIMIT 1",
+                (cid,),
+            ),
+            context_files=store.context_files(cid),
+            parent=store.one(
+                "SELECT parent_id FROM conversation_branches WHERE conversation_id=?",
+                (cid,),
+            ),
+            messages=api_messages(cid),
+            pending=pending,
+        )
+
+    @app.post("/conversations/new")
+    def new_conversation():
+        return RedirectResponse("/chat/" + store.conversation()["id"], status_code=303)
+
+    @app.post("/chat/{cid}/fork")
+    def fork_conversation(cid: str):
+        return RedirectResponse("/chat/" + store.fork(cid), status_code=303)
+
+    @app.post("/chat/{cid}/context")
+    async def attach_context(cid: str, request: Request):
+        form = await request.form()
+        if form.get("remove"):
+            store.execute(
+                "DELETE FROM conversation_context WHERE conversation_id=? AND upload_id=?",
+                (cid, form.get("upload_id")),
+            )
+        else:
+            store.attach(cid, form.get("upload_id"))
+        return RedirectResponse("/chat/" + quote(cid), status_code=303)
+
+    @app.post("/chat/{cid}/rename")
+    async def rename_conversation(cid: str, request: Request):
+        store.execute(
+            "UPDATE conversations SET title=? WHERE id=?",
+            (text((await request.form()).get("title"), 100), cid),
+        )
+        return RedirectResponse("/chat/" + quote(cid), status_code=303)
 
     @app.post("/chat")
     async def send(request: Request):
@@ -388,10 +438,20 @@ def create_app(store=None, start_worker=True):
             uploaded = form.get("file")
             if not isinstance(uploaded, UploadFile) or not uploaded.filename:
                 raise ValueError("请先选择一个文件。")
+            cid = form.get("conversation_id", "")
+            if cid and not store.one("SELECT id FROM conversations WHERE id=?", (cid,)):
+                raise ValueError("对话不存在。")
+            if cid and len(store.context_files(cid)) >= 20:
+                raise ValueError("每个对话最多关联 20 份资料。")
             content = await uploaded.read(MAX_UPLOAD + 1)
             result = await run_in_threadpool(
                 uploads.import_file, uploaded.filename, content
             )
+            if form.get("start_chat"):
+                cid = store.conversation()["id"]
+            if cid:
+                store.attach(cid, result["id"])
+                return RedirectResponse("/chat/" + quote(cid), status_code=303)
         return RedirectResponse("/files?uploaded=" + result["id"], status_code=303)
 
     @app.get("/files/original/{uid}")
@@ -412,6 +472,7 @@ def create_app(store=None, start_worker=True):
         if not item or item["status"] != "ready":
             raise ValueError("这个文件尚无可读文字，不能生成内容总结。")
         cid = store.conversation()["id"]
+        store.attach(cid, uid)
         store.submit(
             cid,
             f"请读取工作目录中的 {item['text_name']}（原文件名：{item['name']}），总结其主要内容和可执行事项。必要时使用 offset 分段读取。请说明提取限制，不推测未读到的图片或缺失页面。",

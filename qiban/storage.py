@@ -59,6 +59,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, content TEXT NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, due_at TEXT NOT NULL, conversation_id TEXT, result TEXT, error TEXT, read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, label TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS conversation_context (conversation_id TEXT NOT NULL, upload_id TEXT NOT NULL, PRIMARY KEY(conversation_id,upload_id));
+                CREATE TABLE IF NOT EXISTS conversation_branches (conversation_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS tasks_schedule ON tasks(status, due_at);
             """)
 
@@ -191,3 +193,59 @@ class Store:
                 "INSERT INTO memories VALUES (:id,:content,:source,:updated_at)", row
             )
         return row
+
+    def context_files(self, cid):
+        if not self.one("SELECT name FROM sqlite_master WHERE name='uploads'"):
+            return []
+        return self.all(
+            "SELECT u.* FROM uploads u JOIN conversation_context c ON c.upload_id=u.id WHERE c.conversation_id=? ORDER BY u.created_at",
+            (cid,),
+        )
+
+    def attach(self, cid, uid):
+        if not self.one("SELECT id FROM conversations WHERE id=?", (cid,)):
+            raise ValueError("对话不存在。")
+        if not self.one("SELECT id FROM uploads WHERE id=?", (uid,)):
+            raise ValueError("资料不存在。")
+        if len(self.context_files(cid)) >= 20:
+            raise ValueError("每个对话最多关联 20 份资料。")
+        self.execute(
+            "INSERT OR IGNORE INTO conversation_context VALUES (?,?)", (cid, uid)
+        )
+
+    def fork(self, cid):
+        with self.connect(transaction=True) as db:
+            original = db.execute(
+                "SELECT * FROM conversations WHERE id=?", (cid,)
+            ).fetchone()
+            if not original:
+                raise ValueError("对话不存在。")
+            if db.execute(
+                "SELECT id FROM tasks WHERE conversation_id=? AND status IN ('queued','running')",
+                (cid,),
+            ).fetchone():
+                raise ValueError("请等待当前回答结束后再创建分支。")
+            new_id = str(uuid.uuid4())
+            db.execute(
+                "INSERT INTO conversations VALUES (?,?,?)",
+                (new_id, original["title"] + " · 分支", now()),
+            )
+            db.execute("INSERT INTO conversation_branches VALUES (?,?)", (new_id, cid))
+            for row in db.execute(
+                "SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid", (cid,)
+            ).fetchall():
+                db.execute(
+                    "INSERT INTO messages VALUES (?,?,?,?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        new_id,
+                        row["role"],
+                        row["content"],
+                        row["created_at"],
+                    ),
+                )
+            db.execute(
+                "INSERT INTO conversation_context SELECT ?,upload_id FROM conversation_context WHERE conversation_id=?",
+                (new_id, cid),
+            )
+        return new_id
