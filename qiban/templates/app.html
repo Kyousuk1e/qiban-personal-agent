@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5f0">
+  {% if pending or (task and task.status in ['queued','running']) %}<meta http-equiv="refresh" content="3">{% endif %}
+  <link rel="stylesheet" href="/static/app.css">
+  <title>栖伴 · Python Personal Agent</title>
+</head>
+<body>
+{% macro token() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endmacro %}
+{% macro avatar(small=false) %}<div class="avatar{% if small %} small{% endif %}"><span></span><span></span></div>{% endmacro %}
+<div class="shell">
+  <aside class="sidebar">
+    <a href="/" class="brand">{{ avatar(true) }}<div>栖伴<span>PERSONAL AGENT</span></div></a>
+    <a href="/" class="new-chat" aria-label="开始新的对话">＋ <span>开始新的对话</span></a>
+    <nav>
+      {% for target,label,icon in [('chat','与栖伴对话','◌'),('tasks','任务与提醒','☷'),('memory','关于你的记忆','◇'),('files','工作文件','▱')] %}
+      <a href="{{ '/' if target == 'chat' else '/' + target }}" class="{% if page == target or (target == 'tasks' and page == 'task') %}active{% endif %}" aria-label="{{ label }}"><span class="nav-icon">{{ icon }}</span><span class="nav-text">{{ label }}</span></a>
+      {% endfor %}
+    </nav>
+    <div class="history-label">最近的对话</div>
+    <div class="history">{% for c in state.conversations[:12] %}<a href="/chat/{{ c.id }}" class="{% if active == c.id %}chosen{% endif %}">{{ c.title }}</a>{% else %}<p>每一个想法，都可以从这里开始。</p>{% endfor %}</div>
+    <div class="sidebar-bottom">
+      <div class="local-label"><span class="dot{% if not state.workerOnline %} offline{% endif %}"></span>{{ '后台助手在线' if state.workerOnline else '后台助手离线' }}</div>
+      <a href="/settings" class="settings-link" aria-label="模型与设置">⚙ <span>模型与设置</span></a>
+      <div class="profile"><div class="profile-icon">我</div><div>我的私人空间<small>Python · 本地存储</small></div><span class="version">v0.2</span></div>
+    </div>
+  </aside>
+  <main>
+    <header><div><span class="breadcrumb">我的空间</span><span>›</span><span>{{ {'chat':'对话','tasks':'任务与提醒','task':'任务详情','memory':'个人记忆','files':'工作文件','settings':'设置'}[page] }}</span></div><span class="mode{% if state.config.mode == 'live' %} live{% endif %}"><span class="dot"></span>{{ state.config.model if state.config.mode == 'live' else '演示模式' }}</span></header>
+    {% if error %}<div class="alert error" role="alert">{{ error }} <a href="/">返回首页</a></div>{% endif %}
+    {% set unread = state.tasks | selectattr('kind','equalto','reminder') | selectattr('status','equalto','succeeded') | rejectattr('read') | list %}
+    {% if unread %}<a class="reminder-banner" href="/tasks/{{ unread[0].id }}">你有 {{ unread|length }} 条未读提醒：{{ unread[0].title }} →</a>{% endif %}
+    {% if page == 'chat' %}
+    <div class="chat-page">
+      {% if not messages %}
+      <div class="welcome"><div class="eyebrow"><span></span>留一点时间，给重要的事</div>{{ avatar() }}
+        <h1>你好，我是栖伴<span>一起把想法，变成进展。</span></h1><p>记住你的偏好，整理手边的资料，照看那些待办。<br>从一件小事开始，我陪你慢慢完成。</p>
+        <div class="suggestions">
+          <a href="/files"><span class="card-icon">▱</span><strong>整理我的资料</strong><span>添加资料，开始整理你的工作空间</span></a>
+          <a href="/memory"><span class="card-icon">◇</span><strong>记住我的偏好</strong><span>让每一次交流都更懂你一点</span></a>
+          <a href="/tasks"><span class="card-icon">◷</span><strong>照看我的待办</strong><span>给重要的小事，留一个提醒</span></a>
+        </div>
+      </div>
+      {% else %}<div class="messages">{% for m in messages %}<div class="message {{ m.role }}">{% if m.role == 'assistant' %}{{ avatar(true) }}{% endif %}<div><small>{{ '栖伴' if m.role == 'assistant' else '你' }}</small><div class="message-body">{{ m.content }}</div></div></div>{% endfor %}
+        {% if pending %}<a class="working" href="/tasks/{{ pending.id }}">◌ {{ labels[pending.status] }} · 查看进度（每 3 秒刷新）</a>{% endif %}
+      </div>{% endif %}
+      <div class="composer-wrap"><form class="composer" action="/chat" method="post">{{ token() }}<input type="hidden" name="conversation_id" value="{{ active or '' }}"><textarea aria-label="给栖伴发消息" name="content" placeholder="有什么想交给我？" maxlength="12000" required {% if pending %}disabled{% endif %}></textarea><div class="composer-bottom"><span>专属工作空间 · Python 助手</span><button type="submit" aria-label="发送消息" {% if pending %}disabled{% endif %}>↑</button></div></form><p class="composer-note">{{ '相关对话、记忆与调用的文件内容会发送至你配置的模型服务。' if state.config.mode == 'live' else '演示模式不调用 AI；文件、记忆与提醒操作真实保存到本地。' }}</p></div>
+    </div>
+    {% elif page == 'tasks' %}
+    <section class="content-page"><div class="page-title"><div class="eyebrow">YOUR MOMENTUM</div><h1>每件事，都有进展。</h1><p>查看执行过程，把需要记得的事放心放在这里。<a href="/tasks">刷新状态</a></p></div>
+      <form class="panel reminder-form" action="/tasks" method="post">{{ token() }}<div><strong>安排一个提醒</strong></div><input aria-label="提醒内容" name="title" placeholder="有什么事需要提醒你？" required maxlength="100"><input aria-label="提醒时间（北京时间）" type="datetime-local" name="dueAt" required><button class="primary">添加提醒</button><small>这里统一使用北京时间（UTC+8）。电脑和服务需保持运行；页面关闭后提醒仍会保存。</small></form>
+      <div class="section-label">全部任务 · {{ state.tasks|length }}</div>
+      {% for t in state.tasks %}<a class="task-row" href="/tasks/{{ t.id }}"><div class="task-icon">{{ '◷' if t.kind == 'reminder' else '◇' }}</div><div><strong>{{ t.title }}</strong><small>{{ '提醒' if t.kind == 'reminder' else '助手任务' }} · {{ t.due_at|localtime }}</small></div><span class="badge {{ t.status }}">{{ labels[t.status] }}</span><span>›</span></a>{% else %}<div class="empty">还没有任务。聊一个想法，或者安排第一个提醒。</div>{% endfor %}
+    </section>
+    {% elif page == 'task' %}
+    <section class="content-page"><a class="back-link" href="/tasks">← 全部任务</a><div class="page-title"><div class="eyebrow">TASK DETAILS</div><h1>{{ task.title }}</h1><span class="badge {{ task.status }}">{{ labels[task.status] }}</span></div>
+      <div class="panel"><div class="timeline">{% for e in events %}<div><span class="timeline-dot"></span><strong>{{ e.label }}</strong><small>{{ e.created_at|localtime }}</small>{% if e.detail %}<p>{{ e.detail }}</p>{% endif %}{% if e.label == '待确认记忆' %}<form action="/memory" method="post">{{ token() }}<input type="hidden" name="content" value="{{ e.detail }}"><button class="secondary">保存这条记忆</button></form>{% endif %}</div>{% endfor %}</div>
+      {% if task.result %}<pre class="task-result">{{ task.result }}</pre>{% endif %}{% if task.error %}<div class="alert error">{{ task.error }}</div>{% endif %}
+      {% if task.status in ['queued','running'] %}<form action="/tasks/{{ task.id }}/cancel" method="post">{{ token() }}<button class="secondary">取消任务</button></form><p class="muted">每 3 秒自动刷新状态。</p>{% elif task.status == 'succeeded' and not task.read %}<form action="/tasks/{{ task.id }}/read" method="post">{{ token() }}<button class="secondary">标记已读</button></form>{% endif %}</div>
+    </section>
+    {% elif page == 'memory' %}
+    <section class="content-page"><div class="page-title"><div class="eyebrow">A LITTLE MORE ABOUT YOU</div><h1>慢慢了解，认真记住。</h1><p>这里的每条记忆都由你决定。可随时编辑或删除。</p></div>
+      <form class="panel" action="/memory" method="post">{{ token() }}<label>有什么希望我记住？<textarea name="content" required maxlength="1000" placeholder="例如：我喜欢简洁的中文回答；我正在学习 Python。"></textarea></label><div class="form-actions"><button class="primary">保存记忆</button></div></form>
+      <div class="memory-grid">{% for m in state.memories %}<article class="memory-card"><p>{{ m.content }}</p><small>{{ m.source }} · {{ m.updated_at|localtime }}</small><details><summary>编辑记忆</summary><form action="/memory/{{ m.id }}/edit" method="post">{{ token() }}<textarea name="content" required maxlength="1000" aria-label="编辑记忆内容">{{ m.content }}</textarea><button class="secondary">保存修改</button></form></details><details><summary>删除记忆</summary><p>删除后不再加载到新的模型请求。此操作无法撤销。</p><form action="/memory/{{ m.id }}/delete" method="post">{{ token() }}<button class="secondary">确认删除</button></form></details></article>{% else %}<div class="empty">从一个偏好开始，不必一次告诉我全部。</div>{% endfor %}</div>
+    </section>
+    {% elif page == 'files' %}
+    <section class="content-page"><div class="page-title"><div class="eyebrow">ROOM FOR YOUR IDEAS</div><h1>资料与成果，在这里。</h1><p>助手只读写专用工作目录。支持 txt、md、csv、json，单文件最大 200 KB。</p></div><form class="panel" action="/files" method="post">{{ token() }}<label>文件名称<input name="name" required maxlength="120" placeholder="我的资料.md"></label><label>文件内容<textarea name="content" class="file-editor" placeholder="粘贴资料，或者写下一个想法……"></textarea></label><div class="form-actions"><button class="primary">创建文件</button></div></form><div class="file-list">{% for name in state.files %}<a href="/api/files/{{ name|urlencode }}" target="_blank" rel="noreferrer"><span>▱ {{ name }}</span>↗</a>{% else %}<div class="empty">工作空间还是空的，添加第一份资料吧。</div>{% endfor %}</div></section>
+    {% elif page == 'settings' %}
+    <section class="content-page"><div class="page-title"><div class="eyebrow">MAKE IT YOURS</div><h1>连接你的智能助手。</h1><p>兼容 Chat Completions 工具调用格式的模型服务。</p></div><form class="panel settings-panel" action="/settings" method="post">{{ token() }}<label>接口基础地址<input name="baseUrl" value="{{ state.config.baseUrl }}" placeholder="https://你的服务商地址/v1"><small>不要包含 /chat/completions。仅支持 HTTPS 或本机 HTTP。</small></label><label>模型名称<input name="model" value="{{ state.config.model }}" placeholder="模型 ID"></label><div class="key-status"><span class="dot{% if not state.config.hasKey %} offline{% endif %}"></span>{{ '已从本地环境加载 API 密钥' if state.config.hasKey else '未配置 API 密钥' }}</div><div class="setup-note">密钥仅从本地 .env 的 MODEL_API_KEY 加载，修改后重启 Python 服务。清空地址和模型名称可进入演示模式。<br><br>连接模型后，对话、已加载记忆和工具读取的资料将发送到对应服务商。</div><button class="primary">保存连接设置</button></form><div class="panel info-panel"><h3>你的数据由你保管</h3><p>聊天、任务和记忆保存在 data/agent.sqlite，工作文件保存在 workspace/。这些目录和 .env 均不会上传至 GitHub。</p><p>当前为 Python 单用户本地版本，不包含 JavaScript、浏览器控制、联网搜索、邮件或支付能力。请勿直接暴露到公网。</p></div></section>
+    {% endif %}
+  </main>
+</div>
+</body>
+</html>

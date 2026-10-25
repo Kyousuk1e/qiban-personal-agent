@@ -1,0 +1,372 @@
+"""FastAPI API and Jinja pages. No client-side JavaScript is required."""
+
+import asyncio
+import secrets
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from .agent import validate_url
+from .files import Files
+from .storage import Store, future, now, text, timestamp
+from .worker import acquire, serve
+
+PROJECT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT / ".env", encoding="utf-8-sig")
+
+
+def create_app(store=None, start_worker=True):
+    store = store or Store()
+    files = Files(store.root)
+    csrf = secrets.token_urlsafe(32)
+    templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+    templates.env.filters["localtime"] = lambda value: (
+        timestamp(value)
+        .astimezone(timezone(timedelta(hours=8)))
+        .strftime("%m月%d日 %H:%M")
+        if value
+        else ""
+    )
+
+    @asynccontextmanager
+    async def lifespan(app):
+        worker = None
+        if start_worker:
+            acquire(store)
+            worker = asyncio.create_task(serve(store))
+        try:
+            yield
+        finally:
+            if worker:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
+
+    app = FastAPI(
+        title="栖伴 Python API",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.store = store
+
+    def state():
+        cfg = store.config()
+        beat = store.setting("workerHeartbeat")
+        try:
+            online = (
+                bool(beat)
+                and (datetime.now(timezone.utc) - timestamp(beat)).total_seconds() < 15
+            )
+        except ValueError:
+            online = False
+        return {
+            "conversations": store.all(
+                "SELECT * FROM conversations ORDER BY created_at DESC"
+            ),
+            "memories": store.all("SELECT * FROM memories ORDER BY updated_at DESC"),
+            "tasks": store.all(
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200"
+            ),
+            "files": files.list(),
+            "workerOnline": online,
+            "config": {
+                "baseUrl": cfg["baseUrl"],
+                "model": cfg["model"],
+                "hasKey": bool(cfg["apiKey"]),
+                "mode": "live" if cfg["baseUrl"] and cfg["model"] else "demo",
+            },
+        }
+
+    @app.middleware("http")
+    async def security(request, call_next):
+        if urlsplit("//" + request.headers.get("host", "")).hostname not in {
+            "127.0.0.1",
+            "localhost",
+        }:
+            return JSONResponse({"error": "仅允许本机访问。"}, status_code=403)
+        origin = request.headers.get("origin")
+        if origin:
+            parsed = urlsplit(origin)
+            if parsed.hostname not in {
+                "localhost",
+                "127.0.0.1",
+            } or parsed.scheme not in {"http", "https"}:
+                return JSONResponse({"error": "来源不允许。"}, status_code=403)
+        if request.method not in {"GET", "HEAD"}:
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > 300000:
+                    return JSONResponse({"error": "请求超过 300 KB。"}, status_code=413)
+            request._body = bytes(body)
+            if request.url.path.startswith("/api/"):
+                valid = request.headers.get("x-agent-client") == "local-ui"
+            else:
+                try:
+                    form = await request.form()
+                    valid = secrets.compare_digest(
+                        str(form.get("_csrf", "")), csrf
+                    ) and secrets.compare_digest(
+                        request.cookies.get("qiban_csrf", ""), csrf
+                    )
+                except Exception:
+                    valid = False
+            if not valid:
+                return JSONResponse(
+                    {"error": "请求校验失败，请刷新页面再试。"}, status_code=403
+                )
+        response = await call_next(request)
+        response.headers.update(
+            {
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'self'; script-src 'none'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            }
+        )
+        return response
+
+    def render(request, page="chat", status_code=200, **extra):
+        data = state()
+        context = {
+            "request": request,
+            "page": page,
+            "state": data,
+            "csrf": csrf,
+            "messages": [],
+            "active": None,
+            "task": None,
+            "events": [],
+            "pending": None,
+            "error": None,
+            "labels": {
+                "queued": "待执行",
+                "running": "执行中",
+                "succeeded": "已完成",
+                "failed": "未完成",
+                "cancelled": "已取消",
+            },
+            **extra,
+        }
+        response = templates.TemplateResponse(
+            request=request, name="app.html", context=context, status_code=status_code
+        )
+        response.set_cookie("qiban_csrf", csrf, httponly=True, samesite="strict")
+        return response
+
+    @app.exception_handler(ValueError)
+    @app.exception_handler(OSError)
+    async def invalid(request, error):
+        message = (
+            "同名文件已存在，请换一个名称。"
+            if isinstance(error, FileExistsError)
+            else "文件不存在。"
+            if isinstance(error, FileNotFoundError)
+            else str(error)
+        )
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": message}, status_code=400)
+        return render(request, error=message, status_code=400)
+
+    def save_settings(body):
+        base, model = body.get("baseUrl", "").strip(), body.get("model", "").strip()
+        if bool(base) != bool(model) or len(base) > 500 or len(model) > 120:
+            raise ValueError("请同时填写接口地址与模型名，或同时清空进入演示模式。")
+        if base:
+            validate_url(base)
+        store.set_setting("baseUrl", base)
+        store.set_setting("model", model)
+
+    def cancel(task_id):
+        store.execute(
+            "UPDATE tasks SET status='cancelled',updated_at=? WHERE id=? AND status IN ('queued','running')",
+            (now(), task_id),
+        )
+
+    @app.get("/api/state")
+    def api_state():
+        return state()
+
+    @app.post("/api/conversations", status_code=201)
+    def api_conversation():
+        return store.conversation()
+
+    @app.get("/api/conversations/{cid}/messages")
+    def api_messages(cid: str):
+        return store.all(
+            "SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid", (cid,)
+        )
+
+    @app.post("/api/conversations/{cid}/messages", status_code=202)
+    async def api_send(cid: str, request: Request):
+        return store.submit(cid, (await request.json()).get("content"))
+
+    @app.post("/api/memories", status_code=201)
+    async def api_memory(request: Request):
+        return store.memory((await request.json()).get("content"))
+
+    @app.patch("/api/memories/{mid}")
+    async def api_edit_memory(mid: str, request: Request):
+        changed = store.execute(
+            "UPDATE memories SET content=?,updated_at=? WHERE id=?",
+            (text((await request.json()).get("content"), 1000), now(), mid),
+        )
+        return JSONResponse({"ok": bool(changed)}, status_code=200 if changed else 404)
+
+    @app.delete("/api/memories/{mid}")
+    def api_delete_memory(mid: str):
+        store.execute("DELETE FROM memories WHERE id=?", (mid,))
+        return {"ok": True}
+
+    @app.post("/api/tasks", status_code=201)
+    async def api_reminder(request: Request):
+        body = await request.json()
+        title = text(body.get("title"), 100)
+        return store.task(
+            title, title, kind="reminder", due_at=future(body.get("dueAt"))
+        )
+
+    @app.get("/api/tasks/{tid}/events")
+    def api_events(tid: str):
+        return store.all("SELECT * FROM events WHERE task_id=? ORDER BY id", (tid,))
+
+    @app.post("/api/tasks/{tid}/cancel")
+    def api_cancel(tid: str):
+        cancel(tid)
+        return {"ok": True}
+
+    @app.post("/api/tasks/{tid}/read")
+    def api_read(tid: str):
+        store.execute("UPDATE tasks SET read=1 WHERE id=?", (tid,))
+        return {"ok": True}
+
+    @app.put("/api/settings")
+    async def api_settings(request: Request):
+        save_settings(await request.json())
+        return {"ok": True}
+
+    @app.get("/api/files")
+    def api_files():
+        return files.list()
+
+    @app.post("/api/files", status_code=201)
+    async def api_write(request: Request):
+        body = await request.json()
+        return files.write(body.get("name"), body.get("content"))
+
+    @app.get("/api/files/{name}")
+    def api_file(name: str):
+        return PlainTextResponse(files.read(name))
+
+    @app.get("/", response_class=HTMLResponse)
+    def home(request: Request):
+        return render(request)
+
+    @app.get("/chat/{cid}", response_class=HTMLResponse)
+    def chat(cid: str, request: Request):
+        pending = store.one(
+            "SELECT * FROM tasks WHERE conversation_id=? AND status IN ('queued','running')",
+            (cid,),
+        )
+        return render(request, active=cid, messages=api_messages(cid), pending=pending)
+
+    @app.post("/chat")
+    async def send(request: Request):
+        form = await request.form()
+        content = text(form.get("content"))
+        cid = form.get("conversation_id") or store.conversation()["id"]
+        store.submit(cid, content)
+        return RedirectResponse(f"/chat/{quote(cid)}", status_code=303)
+
+    @app.get("/tasks", response_class=HTMLResponse)
+    def tasks(request: Request):
+        return render(request, "tasks")
+
+    @app.get("/tasks/{tid}", response_class=HTMLResponse)
+    def detail(tid: str, request: Request):
+        task = store.one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task:
+            raise ValueError("任务不存在。")
+        return render(request, "task", task=task, events=api_events(tid))
+
+    @app.post("/tasks")
+    async def reminder(request: Request):
+        form = await request.form()
+        title = text(form.get("title"), 100)
+        # The no-JavaScript form explicitly uses Beijing time, independent of browser timezone.
+        due = future(str(form.get("dueAt", "")) + "+08:00")
+        result = store.task(title, title, kind="reminder", due_at=due)
+        return RedirectResponse("/tasks/" + result["id"], status_code=303)
+
+    @app.post("/tasks/{tid}/cancel")
+    def cancel_form(tid: str):
+        cancel(tid)
+        return RedirectResponse("/tasks/" + tid, status_code=303)
+
+    @app.post("/tasks/{tid}/read")
+    def read_form(tid: str):
+        api_read(tid)
+        return RedirectResponse("/tasks/" + tid, status_code=303)
+
+    @app.get("/memory", response_class=HTMLResponse)
+    def memories(request: Request):
+        return render(request, "memory")
+
+    @app.post("/memory")
+    async def memory_form(request: Request):
+        store.memory((await request.form()).get("content"))
+        return RedirectResponse("/memory", status_code=303)
+
+    @app.post("/memory/{mid}/edit")
+    async def edit_form(mid: str, request: Request):
+        form = await request.form()
+        store.execute(
+            "UPDATE memories SET content=?,updated_at=? WHERE id=?",
+            (text(form.get("content"), 1000), now(), mid),
+        )
+        return RedirectResponse("/memory", status_code=303)
+
+    @app.post("/memory/{mid}/delete")
+    def delete_form(mid: str):
+        api_delete_memory(mid)
+        return RedirectResponse("/memory", status_code=303)
+
+    @app.get("/files", response_class=HTMLResponse)
+    def files_page(request: Request):
+        return render(request, "files")
+
+    @app.post("/files")
+    async def file_form(request: Request):
+        form = await request.form()
+        files.write(form.get("name"), form.get("content", ""))
+        return RedirectResponse("/files", status_code=303)
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request):
+        return render(request, "settings")
+
+    @app.post("/settings")
+    async def settings_form(request: Request):
+        save_settings(await request.form())
+        return RedirectResponse("/settings", status_code=303)
+
+    app.mount(
+        "/static",
+        StaticFiles(directory=Path(__file__).parent / "static"),
+        name="static",
+    )
+    return app
