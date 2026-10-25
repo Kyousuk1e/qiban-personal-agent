@@ -10,6 +10,7 @@ from urllib.parse import quote, urlsplit
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
@@ -17,10 +18,14 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
 
 from .agent import validate_url
+from .extract import MAX_UPLOAD
 from .files import Files
 from .storage import Store, future, now, text, timestamp
+from .uploads import Uploads
 from .worker import acquire, serve
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -30,6 +35,7 @@ load_dotenv(PROJECT / ".env", encoding="utf-8-sig")
 def create_app(store=None, start_worker=True):
     store = store or Store()
     files = Files(store.root)
+    uploads = Uploads(store)
     csrf = secrets.token_urlsafe(32)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
     templates.env.filters["localtime"] = lambda value: (
@@ -82,6 +88,7 @@ def create_app(store=None, start_worker=True):
                 "SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200"
             ),
             "files": files.list(),
+            "uploads": uploads.all(),
             "workerOnline": online,
             "config": {
                 "baseUrl": cfg["baseUrl"],
@@ -110,8 +117,20 @@ def create_app(store=None, start_worker=True):
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > 300000:
-                    return JSONResponse({"error": "请求超过 300 KB。"}, status_code=413)
+                limit = (
+                    MAX_UPLOAD + 65536
+                    if request.url.path == "/files/upload"
+                    else 300000
+                )
+                if len(body) > limit:
+                    return JSONResponse(
+                        {
+                            "error": "上传请求超过 20 MB。"
+                            if request.url.path == "/files/upload"
+                            else "请求超过 300 KB。"
+                        },
+                        status_code=413,
+                    )
             request._body = bytes(body)
             if request.url.path.startswith("/api/"):
                 valid = request.headers.get("x-agent-client") == "local-ui"
@@ -123,6 +142,7 @@ def create_app(store=None, start_worker=True):
                     ) and secrets.compare_digest(
                         request.cookies.get("qiban_csrf", ""), csrf
                     )
+                    await form.close()
                 except Exception:
                     valid = False
             if not valid:
@@ -156,6 +176,7 @@ def create_app(store=None, start_worker=True):
             "events": [],
             "pending": None,
             "error": None,
+            "uploaded": None,
             "labels": {
                 "queued": "待执行",
                 "running": "执行中",
@@ -183,7 +204,12 @@ def create_app(store=None, start_worker=True):
         )
         if request.url.path.startswith("/api/"):
             return JSONResponse({"error": message}, status_code=400)
-        return render(request, error=message, status_code=400)
+        return render(
+            request,
+            "files" if request.url.path.startswith("/files") else "chat",
+            error=message,
+            status_code=400,
+        )
 
     def save_settings(body):
         base, model = body.get("baseUrl", "").strip(), body.get("model", "").strip()
@@ -350,7 +376,47 @@ def create_app(store=None, start_worker=True):
 
     @app.get("/files", response_class=HTMLResponse)
     def files_page(request: Request):
-        return render(request, "files")
+        return render(
+            request,
+            "files",
+            uploaded=uploads.get(request.query_params.get("uploaded", "")),
+        )
+
+    @app.post("/files/upload")
+    async def upload_form(request: Request):
+        async with request.form(max_files=1, max_fields=5) as form:
+            uploaded = form.get("file")
+            if not isinstance(uploaded, UploadFile) or not uploaded.filename:
+                raise ValueError("请先选择一个文件。")
+            content = await uploaded.read(MAX_UPLOAD + 1)
+            result = await run_in_threadpool(
+                uploads.import_file, uploaded.filename, content
+            )
+        return RedirectResponse("/files?uploaded=" + result["id"], status_code=303)
+
+    @app.get("/files/original/{uid}")
+    def original_file(uid: str):
+        item = uploads.get(uid)
+        if not item:
+            raise ValueError("原文件不存在。")
+        return FileResponse(
+            uploads.root / item["stored_name"],
+            filename=item["name"],
+            media_type="application/octet-stream",
+            content_disposition_type="attachment",
+        )
+
+    @app.post("/files/summarize/{uid}")
+    def summarize_upload(uid: str):
+        item = uploads.get(uid)
+        if not item or item["status"] != "ready":
+            raise ValueError("这个文件尚无可读文字，不能生成内容总结。")
+        cid = store.conversation()["id"]
+        store.submit(
+            cid,
+            f"请读取工作目录中的 {item['text_name']}（原文件名：{item['name']}），总结其主要内容和可执行事项。必要时使用 offset 分段读取。请说明提取限制，不推测未读到的图片或缺失页面。",
+        )
+        return RedirectResponse("/chat/" + cid, status_code=303)
 
     @app.post("/files")
     async def file_form(request: Request):

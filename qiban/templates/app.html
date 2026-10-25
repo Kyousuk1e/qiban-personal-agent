@@ -25,7 +25,7 @@
     <div class="sidebar-bottom">
       <div class="local-label"><span class="dot{% if not state.workerOnline %} offline{% endif %}"></span>{{ '后台助手在线' if state.workerOnline else '后台助手离线' }}</div>
       <a href="/settings" class="settings-link" aria-label="模型与设置">⚙ <span>模型与设置</span></a>
-      <div class="profile"><div class="profile-icon">我</div><div>我的私人空间<small>Python · 本地存储</small></div><span class="version">v0.2</span></div>
+      <div class="profile"><div class="profile-icon">我</div><div>我的私人空间<small>Python · 本地存储</small></div><span class="version">v0.3</span></div>
     </div>
   </aside>
   <main>
@@ -67,7 +67,20 @@
       <div class="memory-grid">{% for m in state.memories %}<article class="memory-card"><p>{{ m.content }}</p><small>{{ m.source }} · {{ m.updated_at|localtime }}</small><details><summary>编辑记忆</summary><form action="/memory/{{ m.id }}/edit" method="post">{{ token() }}<textarea name="content" required maxlength="1000" aria-label="编辑记忆内容">{{ m.content }}</textarea><button class="secondary">保存修改</button></form></details><details><summary>删除记忆</summary><p>删除后不再加载到新的模型请求。此操作无法撤销。</p><form action="/memory/{{ m.id }}/delete" method="post">{{ token() }}<button class="secondary">确认删除</button></form></details></article>{% else %}<div class="empty">从一个偏好开始，不必一次告诉我全部。</div>{% endfor %}</div>
     </section>
     {% elif page == 'files' %}
-    <section class="content-page"><div class="page-title"><div class="eyebrow">ROOM FOR YOUR IDEAS</div><h1>资料与成果，在这里。</h1><p>助手只读写专用工作目录。支持 txt、md、csv、json，单文件最大 200 KB。</p></div><form class="panel" action="/files" method="post">{{ token() }}<label>文件名称<input name="name" required maxlength="120" placeholder="我的资料.md"></label><label>文件内容<textarea name="content" class="file-editor" placeholder="粘贴资料，或者写下一个想法……"></textarea></label><div class="form-actions"><button class="primary">创建文件</button></div></form><div class="file-list">{% for name in state.files %}<a href="/api/files/{{ name|urlencode }}" target="_blank" rel="noreferrer"><span>▱ {{ name }}</span>↗</a>{% else %}<div class="empty">工作空间还是空的，添加第一份资料吧。</div>{% endfor %}</div></section>
+    <section class="content-page">
+      <div class="page-title"><div class="eyebrow">ROOM FOR YOUR IDEAS</div><h1>上传资料，让助手读懂。</h1><p>支持 PDF、Word（DOCX）、Excel（XLSX）、PowerPoint（PPTX），以及 TXT、MD、CSV、JSON、Python 源码和常见配置文件。</p></div>
+      {% if uploaded %}<div class="panel" role="status"><strong>已上传：{{ uploaded.name }}</strong><p>{{ '已生成可读文字，可以交给助手总结。' if uploaded.status == 'ready' else '原文件已保存，但未发现可提取文字。扫描件需要先进行 OCR。' }}</p>{% if uploaded.warning %}<p class="muted">{{ uploaded.warning }}</p>{% endif %}</div>{% endif %}
+      <form class="panel" action="/files/upload" method="post" enctype="multipart/form-data">{{ token() }}
+        <label>选择项目文件<input type="file" name="file" required accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.py,.toml,.yaml,.yml,.ini,.log"></label>
+        <p class="muted">每次上传一个文件，最大 20 MB。同名文件各自保存，不覆盖旧版本。原件保存在本机，解析后的文字出现在工作文件列表。</p>
+        <p class="muted">扫描 PDF、图片和文档中的图形尚不支持 OCR；旧版 DOC / XLS / PPT 请先另存为新格式。上传不会自动将内容发送给模型。</p>
+        <div class="form-actions"><button class="primary">上传并提取文字</button></div>
+      </form>
+      <div class="section-label">已上传的项目资料</div>
+      {% for item in state.uploads %}<article class="panel"><strong>{{ item.name }}</strong><p class="muted">{{ item.created_at|localtime }} · {{ '可供助手阅读' if item.status == 'ready' else '未提取到文字' }}</p>{% if item.warning %}<p class="muted">{{ item.warning }}</p>{% endif %}<div class="upload-actions"><a class="secondary" href="/files/original/{{ item.id }}">下载原文件</a><a class="secondary" href="/api/files/{{ item.text_name }}" target="_blank" rel="noreferrer">查看提取文字</a>{% if item.status == 'ready' %}<form action="/files/summarize/{{ item.id }}" method="post">{{ token() }}<button class="primary">让助手总结</button></form>{% endif %}</div></article>{% else %}<div class="empty">还没有上传文件。先选择一份项目资料吧。</div>{% endfor %}
+      <details class="panel"><summary>手动创建文本文件</summary><form action="/files" method="post">{{ token() }}<label>文件名称<input name="name" required maxlength="120" placeholder="我的资料.md"></label><label>文件内容<textarea name="content" class="file-editor" placeholder="粘贴资料，或者写下一个想法……"></textarea></label><div class="form-actions"><button class="primary">创建文件</button></div></form></details>
+      <div class="section-label">全部工作文本 · 手动创建的文件最大 200 KB</div><div class="file-list">{% for name in state.files %}<a href="/api/files/{{ name|urlencode }}" target="_blank" rel="noreferrer"><span>▱ {{ name }}</span>↗</a>{% endfor %}</div>
+    </section>
     {% elif page == 'settings' %}
     <section class="content-page"><div class="page-title"><div class="eyebrow">MAKE IT YOURS</div><h1>连接你的智能助手。</h1><p>兼容 Chat Completions 工具调用格式的模型服务。</p></div><form class="panel settings-panel" action="/settings" method="post">{{ token() }}<label>接口基础地址<input name="baseUrl" value="{{ state.config.baseUrl }}" placeholder="https://你的服务商地址/v1"><small>不要包含 /chat/completions。仅支持 HTTPS 或本机 HTTP。</small></label><label>模型名称<input name="model" value="{{ state.config.model }}" placeholder="模型 ID"></label><div class="key-status"><span class="dot{% if not state.config.hasKey %} offline{% endif %}"></span>{{ '已从本地环境加载 API 密钥' if state.config.hasKey else '未配置 API 密钥' }}</div><div class="setup-note">密钥仅从本地 .env 的 MODEL_API_KEY 加载，修改后重启 Python 服务。清空地址和模型名称可进入演示模式。<br><br>连接模型后，对话、已加载记忆和工具读取的资料将发送到对应服务商。</div><button class="primary">保存连接设置</button></form><div class="panel info-panel"><h3>你的数据由你保管</h3><p>聊天、任务和记忆保存在 data/agent.sqlite，工作文件保存在 workspace/。这些目录和 .env 均不会上传至 GitHub。</p><p>当前为 Python 单用户本地版本，不包含 JavaScript、浏览器控制、联网搜索、邮件或支付能力。请勿直接暴露到公网。</p></div></section>
     {% endif %}
@@ -75,3 +88,4 @@
 </div>
 </body>
 </html>
+

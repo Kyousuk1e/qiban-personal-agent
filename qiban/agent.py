@@ -67,6 +67,11 @@ TOOLS = [
         "dueAt",
     ),
 ]
+TOOLS[1]["function"]["parameters"]["properties"]["offset"] = {
+    "type": "integer",
+    "minimum": 0,
+    "description": "从该字符位置开始读取；按返回的 next_offset 继续读取长文件。",
+}
 
 
 def execute_tool(store, task, name, args):
@@ -74,9 +79,27 @@ def execute_tool(store, task, name, args):
     if not isinstance(args, dict):
         raise ValueError("工具参数必须是对象。")
     if name == "list_files":
-        return files.list()
+        imports = (
+            store.all(
+                "SELECT name,text_name,status,warning FROM uploads ORDER BY created_at DESC LIMIT 100"
+            )
+            if store.one(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='uploads'"
+            )
+            else []
+        )
+        return {"files": files.list(), "uploads": imports}
     if name == "read_file":
-        return files.read(args.get("name"))
+        content = files.read(args.get("name"))
+        offset = args.get("offset", 0)
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset 必须是非负整数。")
+        end = min(offset + 12000, len(content))
+        return {
+            "text": content[offset:end],
+            "total_chars": len(content),
+            "next_offset": end if end < len(content) else None,
+        }
     if name == "write_file":
         return files.write(args.get("name"), args.get("content"))
     if name == "propose_memory":

@@ -1132,3 +1132,6 @@ details { margin-top:16px; } summary { cursor:pointer;color:#73866a;font-size:12
 .reminder-banner { text-decoration:none; }
 .page-title h1 { overflow-wrap:anywhere; }
 @media(max-width:720px){ .new-chat { font-size:24px; } .new-chat span,.nav-text,.settings-link span { display:none; } nav a,.settings-link { justify-content:center;padding:13px; } .suggestions a { padding:13px 15px; } .suggestions .card-icon { float:left;margin:0 12px 0 0; } }
+
+.upload-actions { display:flex;gap:10px;align-items:center;flex-wrap:wrap; }
+input[type=file] { width:100%;min-width:0; }
