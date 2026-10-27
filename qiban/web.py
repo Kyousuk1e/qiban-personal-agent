@@ -475,6 +475,13 @@ def create_app(store=None, start_worker=True):
                 "SELECT parent_id FROM conversation_branches WHERE conversation_id=?",
                 (cid,),
             ),
+            welcome_connections={
+                row["service"]
+                for row in google.connections(store.bot_for(cid)["id"])
+                if row["status"] == "connected"
+            }
+            if store.bot_for(cid)
+            else set(),
             messages=api_messages(cid),
             pending=pending,
         )

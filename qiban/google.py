@@ -184,7 +184,9 @@ class Google:
             timeout=25,
             follow_redirects=False,
             trust_env=False,
-            proxy=os.getenv("GOOGLE_HTTP_PROXY") or None,
+            proxy=(os.getenv("GOOGLE_HTTP_PROXY") or None)
+            if self.transport is None
+            else None,
             transport=self.transport,
         )
 
