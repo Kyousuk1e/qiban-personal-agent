@@ -165,7 +165,79 @@ def create_app(store=None, start_worker=True):
 
     def render(request, page="chat", status_code=200, **extra):
         data = state()
+        roster = [
+            {
+                "id": "research",
+                "name": "行业调研",
+                "glyph": "研",
+                "color": "amber",
+                "description": "跟踪行业变化，整理可靠的信息",
+                "example": "搜集最近 7 天的重要更新，整理成中文周报。",
+            },
+            {
+                "id": "content",
+                "name": "内容运营",
+                "glyph": "文",
+                "color": "coral",
+                "description": "从选题到内容，保持一致的表达",
+                "example": "围绕本周产品更新，整理内容选题与发布计划。",
+            },
+            {
+                "id": "data",
+                "name": "数据分析",
+                "glyph": "数",
+                "color": "blue",
+                "description": "理解指标，找到变化背后的原因",
+                "example": "对比本周与过去四周的转化情况，提出排查建议。",
+            },
+            {
+                "id": "product",
+                "name": "产品经理",
+                "glyph": "产",
+                "color": "purple",
+                "description": "梳理需求，把想法变成清晰计划",
+                "example": "根据用户反馈整理需求，标注优先级和待确认事项。",
+            },
+            {
+                "id": "developer",
+                "name": "开发与测试",
+                "glyph": "码",
+                "color": "indigo",
+                "description": "实现功能，检查质量，跟进问题",
+                "example": "检查项目中的关键流程，整理测试用例和问题清单。",
+            },
+            {
+                "id": "support",
+                "name": "客服复盘",
+                "glyph": "客",
+                "color": "teal",
+                "description": "整理反馈，沉淀可复用的经验",
+                "example": "分析本周客服记录，归纳高频问题和改进建议。",
+            },
+        ]
+        preview = (
+            next(
+                (
+                    bot
+                    for bot in roster
+                    if bot["id"] == request.query_params.get("preview")
+                ),
+                None,
+            )
+            if page == "chat"
+            else None
+        )
+        query = request.query_params.get("q", "").strip()[:100]
+        if query:
+            data["conversations"] = [
+                c
+                for c in data["conversations"]
+                if query.casefold() in c["title"].casefold()
+            ]
         context = {
+            "roster": roster,
+            "preview": preview,
+            "query": query,
             "request": request,
             "page": page,
             "state": data,
