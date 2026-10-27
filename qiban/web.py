@@ -37,7 +37,7 @@ def create_app(store=None, start_worker=True):
     store = store or Store()
     files = Files(store.root)
     uploads = Uploads(store)
-    first_bot = store.create_bot(first=True)
+    store.create_bot(first=True)
     google = Google(store)
     csrf = secrets.token_urlsafe(32)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -335,7 +335,7 @@ def create_app(store=None, start_worker=True):
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        return chat(first_bot["conversation_id"], request)
+        return chat(store.create_bot(first=True)["conversation_id"], request)
 
     @app.get("/bots/{bid}/apps")
     def apps_page(bid: str, request: Request):
@@ -444,6 +444,19 @@ def create_app(store=None, start_worker=True):
         if not bot:
             raise ValueError("队友不存在。")
         return chat(bot["conversation_id"], request)
+
+    @app.get("/bots/{bid}/delete")
+    def delete_bot_page(bid: str, request: Request):
+        bot = store.one("SELECT * FROM bots WHERE id=?", (bid,))
+        if not bot:
+            raise ValueError("队友不存在。")
+        return render(request, page="delete_bot", current_bot=bot)
+
+    @app.post("/bots/{bid}/delete")
+    async def delete_bot(bid: str, request: Request):
+        form = await request.form()
+        store.delete_bot(bid, form.get("confirmation", ""))
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/bots/{bid}/configure")
     async def configure_bot(bid: str, request: Request):

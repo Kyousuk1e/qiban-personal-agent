@@ -325,3 +325,52 @@ class Store:
             ("与" + name + "的对话", bot["conversation_id"], bot["conversation_id"]),
         )
         return self.one("SELECT * FROM bots WHERE id=?", (bid,))
+
+    def delete_bot(self, bid, confirmation):
+        with self.connect(transaction=True) as db:
+            bot = db.execute("SELECT * FROM bots WHERE id=?", (bid,)).fetchone()
+            if not bot or confirmation != bot["name"]:
+                raise ValueError("请输入队友的完整名字以确认删除。")
+            cids = [
+                r[0]
+                for r in db.execute(
+                    "SELECT conversation_id FROM conversation_bots WHERE bot_id=?",
+                    (bid,),
+                )
+            ]
+            for cid in cids:
+                if db.execute(
+                    "SELECT id FROM tasks WHERE conversation_id=? AND status='running'",
+                    (cid,),
+                ).fetchone():
+                    raise ValueError(
+                        "这位队友仍有任务正在执行，请等待完成或取消后再删除。"
+                    )
+            for cid in cids:
+                db.execute(
+                    "DELETE FROM events WHERE task_id IN (SELECT id FROM tasks WHERE conversation_id=?)",
+                    (cid,),
+                )
+                for table in (
+                    "tasks",
+                    "messages",
+                    "conversation_context",
+                    "conversation_bots",
+                ):
+                    db.execute(f"DELETE FROM {table} WHERE conversation_id=?", (cid,))
+                db.execute(
+                    "DELETE FROM conversation_branches WHERE conversation_id=? OR parent_id=?",
+                    (cid, cid),
+                )
+                db.execute("DELETE FROM conversations WHERE id=?", (cid,))
+            for table in (
+                "google_connections",
+                "google_oauth_states",
+                "google_oauth_attempts",
+            ):
+                if db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone():
+                    db.execute(f"DELETE FROM {table} WHERE bot_id=?", (bid,))
+            db.execute("DELETE FROM bots WHERE id=?", (bid,))
