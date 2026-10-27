@@ -36,6 +36,7 @@ def create_app(store=None, start_worker=True):
     store = store or Store()
     files = Files(store.root)
     uploads = Uploads(store)
+    first_bot = store.create_bot(first=True)
     csrf = secrets.token_urlsafe(32)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
     templates.env.filters["localtime"] = lambda value: (
@@ -81,7 +82,7 @@ def create_app(store=None, start_worker=True):
             online = False
         return {
             "conversations": store.all(
-                "SELECT c.*, b.parent_id FROM conversations c LEFT JOIN conversation_branches b ON b.conversation_id=c.id ORDER BY c.created_at DESC"
+                "SELECT c.*, b.parent_id, cb.bot_id FROM conversations c LEFT JOIN conversation_branches b ON b.conversation_id=c.id LEFT JOIN conversation_bots cb ON cb.conversation_id=c.id ORDER BY c.created_at DESC"
             ),
             "memories": store.all("SELECT * FROM memories ORDER BY updated_at DESC"),
             "tasks": store.all(
@@ -165,69 +166,15 @@ def create_app(store=None, start_worker=True):
 
     def render(request, page="chat", status_code=200, **extra):
         data = state()
-        roster = [
-            {
-                "id": "research",
-                "name": "行业调研",
-                "glyph": "研",
-                "color": "amber",
-                "description": "跟踪行业变化，整理可靠的信息",
-                "example": "搜集最近 7 天的重要更新，整理成中文周报。",
-            },
-            {
-                "id": "content",
-                "name": "内容运营",
-                "glyph": "文",
-                "color": "coral",
-                "description": "从选题到内容，保持一致的表达",
-                "example": "围绕本周产品更新，整理内容选题与发布计划。",
-            },
-            {
-                "id": "data",
-                "name": "数据分析",
-                "glyph": "数",
-                "color": "blue",
-                "description": "理解指标，找到变化背后的原因",
-                "example": "对比本周与过去四周的转化情况，提出排查建议。",
-            },
-            {
-                "id": "product",
-                "name": "产品经理",
-                "glyph": "产",
-                "color": "purple",
-                "description": "梳理需求，把想法变成清晰计划",
-                "example": "根据用户反馈整理需求，标注优先级和待确认事项。",
-            },
-            {
-                "id": "developer",
-                "name": "开发与测试",
-                "glyph": "码",
-                "color": "indigo",
-                "description": "实现功能，检查质量，跟进问题",
-                "example": "检查项目中的关键流程，整理测试用例和问题清单。",
-            },
-            {
-                "id": "support",
-                "name": "客服复盘",
-                "glyph": "客",
-                "color": "teal",
-                "description": "整理反馈，沉淀可复用的经验",
-                "example": "分析本周客服记录，归纳高频问题和改进建议。",
-            },
-        ]
-        preview = (
-            next(
-                (
-                    bot
-                    for bot in roster
-                    if bot["id"] == request.query_params.get("preview")
-                ),
-                None,
-            )
-            if page == "chat"
-            else None
+        roster = store.all("SELECT * FROM bots ORDER BY created_at")
+        current_bot = (
+            store.bot_for(extra.get("active")) if extra.get("active") else None
         )
         query = request.query_params.get("q", "").strip()[:100]
+        if current_bot and not query:
+            data["conversations"] = [
+                c for c in data["conversations"] if c.get("bot_id") == current_bot["id"]
+            ]
         if query:
             data["conversations"] = [
                 c
@@ -236,7 +183,8 @@ def create_app(store=None, start_worker=True):
             ]
         context = {
             "roster": roster,
-            "preview": preview,
+            "preview": None,
+            "current_bot": current_bot,
             "query": query,
             "request": request,
             "page": page,
@@ -379,7 +327,27 @@ def create_app(store=None, start_worker=True):
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        return render(request)
+        return chat(first_bot["conversation_id"], request)
+
+    @app.post("/bots/new")
+    def new_bot():
+        bot = store.create_bot()
+        return RedirectResponse("/bots/" + bot["id"], status_code=303)
+
+    @app.get("/bots/{bid}")
+    def bot_page(bid: str, request: Request):
+        bot = store.one("SELECT * FROM bots WHERE id=?", (bid,))
+        if not bot:
+            raise ValueError("队友不存在。")
+        return chat(bot["conversation_id"], request)
+
+    @app.post("/bots/{bid}/configure")
+    async def configure_bot(bid: str, request: Request):
+        form = await request.form()
+        bot = store.configure_bot(
+            bid, form.get("prompt", ""), form.get("choice") or form.get("name", "")
+        )
+        return RedirectResponse("/bots/" + bot["id"], status_code=303)
 
     @app.get("/chat/{cid}", response_class=HTMLResponse)
     def chat(cid: str, request: Request):

@@ -130,3 +130,27 @@ header .bot-icon {width:25px;height:25px;font-size:10px}
 .preview-notice,.preview-badge {color:#7d7d7d}
 .shell:has(#navigation-toggle:focus-visible) .mobile-navigation,.shell:has(#context-toggle:focus-visible) .context-trigger {outline:2px solid #7c9690;outline-offset:2px}
 @media(max-width:640px) {.sidebar-top {height:60px}}
+.bot-settings {position:relative;font-size:11px;color:#888}
+.bot-settings>summary {list-style:none;padding:8px}
+.bot-settings .menu-content {top:32px;width:310px}
+.bot-settings label {display:block;font-size:11px;margin-bottom:12px}
+.bot-settings input,.bot-settings textarea {width:100%;margin-top:7px;font-size:12px}
+.bot-settings textarea {min-height:130px}
+.onboarding {width:100%;max-width:750px;margin:auto;flex-shrink:0;padding:35px 0}
+.intro-bubble {background:#f1f1f0;border-radius:17px;padding:20px 23px;font-size:15px;line-height:1.9;margin-bottom:12px}
+.setup-card {background:#f1f1f0;border-radius:17px;padding:22px}
+.setup-card h1 {font-size:18px;font-weight:600;margin:0 0 7px}
+.setup-card>p {font-size:12px;color:#888;margin:0 0 18px}
+.name-options {background:#fff;border-radius:11px;overflow:hidden;margin-bottom:22px}
+.name-options button {display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:13px 15px;border-bottom:1px solid #f1f1f1;font-size:16px}
+.name-options button:last-child {border:0}
+.name-options button:hover {background:#fafafa}
+.name-options button span {display:grid;place-items:center;width:25px;height:25px;background:#eee;border-radius:6px;color:#999;font-size:13px}
+.name-options button i {margin-left:auto;font-size:12px;color:#bbb;font-style:normal}
+.setup-label {display:block;font-size:11px;color:#888;margin-bottom:9px}
+.setup-card textarea {min-height:85px;background:white;font-size:13px;border-color:#d7d7d7}
+.setup-footer {display:flex;align-items:center;justify-content:space-between;gap:15px;margin-top:12px}
+.setup-footer small {font-size:10px}.setup-footer .primary {border-radius:20px;padding:10px 19px;font-size:12px;white-space:nowrap}
+.onboarding-note {text-align:center;font-size:10px;color:#999;line-height:1.7;margin:16px 5px 0}
+.chat-page:has(.onboarding) .composer-wrap {display:none}
+@media(max-width:640px) {.intro-bubble {font-size:13px;padding:17px}.setup-card {padding:17px}.setup-footer {align-items:flex-end}.setup-footer small {font-size:9px}.header-actions {gap:3px}.bot-settings .menu-content {right:-40px;width:280px}.onboarding {padding:22px 0}.setup-card h1 {font-size:17px}}

@@ -59,6 +59,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, content TEXT NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, due_at TEXT NOT NULL, conversation_id TEXT, result TEXT, error TEXT, read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, label TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL,configured INTEGER NOT NULL DEFAULT 0,conversation_id TEXT NOT NULL,color TEXT NOT NULL,created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS conversation_bots (conversation_id TEXT PRIMARY KEY,bot_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS conversation_context (conversation_id TEXT NOT NULL, upload_id TEXT NOT NULL, PRIMARY KEY(conversation_id,upload_id));
                 CREATE TABLE IF NOT EXISTS conversation_branches (conversation_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS tasks_schedule ON tasks(status, due_at);
@@ -134,9 +136,18 @@ class Store:
         )
         return self.one("SELECT * FROM tasks WHERE id=?", (task_id,))
 
-    def conversation(self):
+    def conversation(self, bot_id=None):
         row = {"id": str(uuid.uuid4()), "title": "新的对话", "created_at": now()}
         self.execute("INSERT INTO conversations VALUES (:id,:title,:created_at)", row)
+        bot = (
+            self.one("SELECT id FROM bots WHERE id=?", (bot_id,))
+            if bot_id
+            else self.one("SELECT id FROM bots ORDER BY created_at LIMIT 1")
+        )
+        if bot:
+            self.execute(
+                "INSERT INTO conversation_bots VALUES (?,?)", (row["id"], bot["id"])
+            )
         return row
 
     def submit(self, conversation_id, content):
@@ -231,6 +242,10 @@ class Store:
                 (new_id, original["title"] + " · 分支", now()),
             )
             db.execute("INSERT INTO conversation_branches VALUES (?,?)", (new_id, cid))
+            db.execute(
+                "INSERT INTO conversation_bots SELECT ?,bot_id FROM conversation_bots WHERE conversation_id=?",
+                (new_id, cid),
+            )
             for row in db.execute(
                 "SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid", (cid,)
             ).fetchall():
@@ -249,3 +264,64 @@ class Store:
                 (new_id, cid),
             )
         return new_id
+
+    def create_bot(self, first=False):
+        with self.connect(transaction=True) as db:
+            if first:
+                existing = db.execute(
+                    "SELECT * FROM bots ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if existing:
+                    return dict(existing)
+            bid, cid, time = str(uuid.uuid4()), str(uuid.uuid4()), now()
+            count = db.execute("SELECT count(*) FROM bots").fetchone()[0]
+            color = ("teal", "amber", "coral", "blue", "purple", "indigo")[count % 6]
+            name = "栖伴" if first else "新队友"
+            db.execute(
+                "INSERT INTO conversations VALUES (?,?,?)",
+                (cid, "与" + name + "的对话", time),
+            )
+            db.execute(
+                "INSERT INTO bots VALUES (?,?,?,0,?,?,?)",
+                (bid, name, "", cid, color, time),
+            )
+            db.execute("INSERT INTO conversation_bots VALUES (?,?)", (cid, bid))
+            if first:
+                db.execute(
+                    "INSERT OR IGNORE INTO conversation_bots SELECT id,? FROM conversations",
+                    (bid,),
+                )
+        return self.one("SELECT * FROM bots WHERE id=?", (bid,))
+
+    def bot_for(self, cid):
+        return self.one(
+            "SELECT b.* FROM bots b JOIN conversation_bots c ON c.bot_id=b.id WHERE c.conversation_id=?",
+            (cid,),
+        )
+
+    def configure_bot(self, bid, prompt, name=""):
+        import re
+
+        bot = self.one("SELECT * FROM bots WHERE id=?", (bid,))
+        if not bot:
+            raise ValueError("队友不存在。")
+        prompt = text(prompt, 4000) if prompt and prompt.strip() else ""
+        if not name and prompt:
+            match = re.search(
+                r"(?:名字(?:叫做|叫|是)|你叫|称呼你为|叫你)\s*[「『“\"]?([^」』”\"，,。！!\s]{1,24})",
+                prompt,
+            )
+            if match:
+                name = match.group(1)
+        name = text(name, 24) if name else bot["name"]
+        if not prompt:
+            prompt = "你叫" + name + "，是一位友好、可靠的个人助手。"
+        self.execute(
+            "UPDATE bots SET name=?,prompt=?,configured=1 WHERE id=?",
+            (name, prompt, bid),
+        )
+        self.execute(
+            "UPDATE conversations SET title=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id=?)",
+            ("与" + name + "的对话", bot["conversation_id"], bot["conversation_id"]),
+        )
+        return self.one("SELECT * FROM bots WHERE id=?", (bid,))
