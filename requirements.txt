@@ -28,3 +28,7 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.54.0
 xlsxwriter==3.3.0
+
+cryptography==48.0.1
+cffi==2.1.1
+pycparser==3.12

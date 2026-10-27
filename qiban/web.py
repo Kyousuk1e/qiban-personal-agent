@@ -24,6 +24,7 @@ from starlette.datastructures import UploadFile
 from .agent import validate_url
 from .extract import MAX_UPLOAD
 from .files import Files
+from .google import SERVICES, Google
 from .storage import Store, future, now, text, timestamp
 from .uploads import Uploads
 from .worker import acquire, serve
@@ -37,6 +38,7 @@ def create_app(store=None, start_worker=True):
     files = Files(store.root)
     uploads = Uploads(store)
     first_bot = store.create_bot(first=True)
+    google = Google(store)
     csrf = secrets.token_urlsafe(32)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
     templates.env.filters["localtime"] = lambda value: (
@@ -167,7 +169,7 @@ def create_app(store=None, start_worker=True):
     def render(request, page="chat", status_code=200, **extra):
         data = state()
         roster = store.all("SELECT * FROM bots ORDER BY created_at")
-        current_bot = (
+        current_bot = extra.get("current_bot") or (
             store.bot_for(extra.get("active")) if extra.get("active") else None
         )
         query = request.query_params.get("q", "").strip()[:100]
@@ -186,6 +188,12 @@ def create_app(store=None, start_worker=True):
             "preview": None,
             "current_bot": current_bot,
             "query": query,
+            "apps": [],
+            "google_ready": False,
+            "google_redirect": "",
+            "app_filter": "all",
+            "app_query": "",
+            "notice": None,
             "request": request,
             "page": page,
             "state": data,
@@ -328,6 +336,102 @@ def create_app(store=None, start_worker=True):
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
         return chat(first_bot["conversation_id"], request)
+
+    @app.get("/bots/{bid}/apps")
+    def apps_page(bid: str, request: Request):
+        bot = store.one("SELECT * FROM bots WHERE id=?", (bid,))
+        if not bot:
+            raise ValueError("队友不存在。")
+        connected = {row["service"]: row for row in google.connections(bid)}
+        category = request.query_params.get("category", "all")
+        query = request.query_params.get("search", "").strip()[:100]
+        apps = [
+            {"id": key, **value, "connection": connected.get(key)}
+            for key, value in SERVICES.items()
+        ]
+        apps = [
+            item
+            for item in apps
+            if (category != "connected" or item["connection"])
+            and (category not in ("通信", "生产力") or item["category"] == category)
+            and query.casefold() in (item["name"] + item["description"]).casefold()
+        ]
+        notices = {
+            "connected": "Google 应用已连接到当前队友。",
+            "cancelled": "已取消授权，未新增连接。",
+            "disconnected": "已移除当前队友的本地授权。",
+            "configured": "OAuth 应用配置已保存，可以开始连接。",
+            "failed": "Google 授权未完成，请检查配置、网络及所选权限后重试。",
+        }
+        return render(
+            request,
+            "apps",
+            current_bot=bot,
+            apps=apps,
+            google_ready=google.configured(),
+            google_redirect=google.config()["redirect_uri"],
+            app_filter=category,
+            app_query=query,
+            notice=notices.get(request.query_params.get("notice")),
+        )
+
+    @app.post("/bots/{bid}/apps/google/configure")
+    async def google_configure(bid: str, request: Request):
+        if not store.one("SELECT id FROM bots WHERE id=?", (bid,)):
+            raise ValueError("队友不存在。")
+        form = await request.form()
+        google.save_config(
+            str(form.get("client_id", "")), str(form.get("client_secret", ""))
+        )
+        return RedirectResponse(
+            "/bots/" + bid + "/apps?notice=configured", status_code=303
+        )
+
+    @app.post("/bots/{bid}/apps/{service}/connect")
+    def google_start(bid: str, service: str, request: Request):
+        if request.url.hostname != "127.0.0.1" or request.url.port != 4317:
+            raise ValueError(
+                "请使用 http://127.0.0.1:4317 打开助手后开始 Google 授权。"
+            )
+        binding = request.cookies.get("qiban_google_oauth") or secrets.token_urlsafe(32)
+        response = RedirectResponse(
+            google.start(bid, service, binding), status_code=303
+        )
+        response.set_cookie(
+            "qiban_google_oauth",
+            binding,
+            httponly=True,
+            samesite="lax",
+            max_age=600,
+            path="/",
+        )
+        return response
+
+    @app.get("/oauth/google/callback")
+    async def google_callback(request: Request):
+        row = google.consume(
+            request.query_params.get("state", ""),
+            request.cookies.get("qiban_google_oauth", ""),
+        )
+        notice = "cancelled" if request.query_params.get("error") else "connected"
+        if notice == "connected":
+            try:
+                code = request.query_params.get("code", "")
+                if not code:
+                    raise ValueError("缺少授权码。")
+                await google.exchange(row, code)
+            except ValueError:
+                notice = "failed"
+        return RedirectResponse(
+            "/bots/" + row["bot_id"] + "/apps?notice=" + notice, status_code=303
+        )
+
+    @app.post("/bots/{bid}/apps/{service}/disconnect")
+    def google_disconnect(bid: str, service: str):
+        google.disconnect(bid, service)
+        return RedirectResponse(
+            "/bots/" + bid + "/apps?notice=disconnected", status_code=303
+        )
 
     @app.post("/bots/new")
     def new_bot():

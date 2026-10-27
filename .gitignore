@@ -15,3 +15,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .idea/
+
+# Downloaded OAuth credentials must remain local
+client_secret*.json

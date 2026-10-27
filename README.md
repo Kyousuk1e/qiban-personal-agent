@@ -50,6 +50,39 @@ python3 -m venv .venv
 
 资料面板按需展开，会话分支仍保留在所属队友下。全部交互使用 Python 服务端模板和原生表单，无 JavaScript。
 
+## Google 应用连接（v0.7）
+
+打开某位队友，点击右上角 **连接应用**。支持搜索、分类、已连接筛选、账号显示及断开当前队友授权。
+
+| 应用 | 当前工具 | OAuth 权限 |
+|---|---|---|
+| Gmail | 搜索最多 10 封邮件、按 ID 读取纯文本（最多 16000 字符，无附件） | `gmail.readonly` |
+| Google Calendar | 读取主日历指定时间范围最多 30 条事件 | `calendar.events.readonly` |
+| Google Drive | 按名称搜索最多 20 个文件的名称、类型、时间和链接，不读取正文 | `drive.metadata.readonly` |
+
+结果会标记是否还有更多记录；此版本不自动遍历下一页，不声称搜索结果完整。三种连接均额外申请 `userinfo.email`，用于显示当前授权账号。连接不会自动读取资料；用户请求时，相关只读工具结果会发送到配置的模型提供商。
+
+### 首次配置
+
+1. 在 [Google Cloud Console](https://console.cloud.google.com/apis/dashboard) 创建项目，启用 Gmail API、Google Calendar API、Google Drive API。
+2. 配置 OAuth 同意屏幕和所需 scope；测试模式下将自己的 Google 账号加入测试用户。
+3. 创建 **Web 应用** OAuth 客户端，将重定向 URI 精确设置为 `http://127.0.0.1:4317/oauth/google/callback`。
+4. 在助手的“连接应用 → 首次配置 Google 登录”输入 Client ID 和 Client Secret。配置加密写入 `data/google-client.enc`。也可通过 `.env` 的 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` 配置后重启；网页保存的配置优先。
+5. 使用 **http://127.0.0.1:4317** 打开助手，点击目标应用的“连接”，在 Google 页面完成账号选择和授权。回调成功后才显示已连接。
+
+完整授权需要用户自己的 Google OAuth 应用与同意操作。本仓库不附带客户端凭据。Gmail 和 Drive 的相关权限可能涉及 Google 验证要求；公开发布前请阅读 [OAuth Web 应用指南](https://developers.google.com/identity/protocols/oauth2/web-server) 和各 API scope 文档。Google 登录页面如不允许内嵌浏览器，请改用 Chrome 或 Edge。
+
+若本机需要代理访问 Google，可在 `.env` 设置 `GOOGLE_HTTP_PROXY=http://127.0.0.1:7897`，随后重启；端口应按自己的代理配置填写。代理只应用于 Google OAuth / API 请求，模型请求不受影响。
+
+### 授权边界与存储
+
+- 每位 Bot 的每项服务单独保存账号与令牌；创建新队友或给其他队友授权不会自动共享。会话分支继承所属 Bot 的应用访问权限。
+- OAuth 使用一次性 state、10 分钟有效期、浏览器绑定和 PKCE；拒绝缺失权限、错误浏览器、过期和重放请求。新授权替代旧授权请求，断开连接阻止尚未完成的回调重新连接。
+- Access token / refresh token 使用 Fernet 加密存入 SQLite；密钥在 `data/google-token.key`。备份应同时包含数据库与此密钥。加密不能抵御能读取整个本机 data 目录的攻击者。
+- 页面、`/api/state` 和模型工具结果不返回令牌或客户端密钥。Uvicorn access log 已关闭，避免 OAuth 回调 URL 中的授权码进入访问日志。
+- 断开连接删除此 Bot 的本地凭据及未完成授权，不自动撤销 Google 账号对整个 OAuth 应用的授权；可在 [Google 账号连接管理](https://myaccount.google.com/connections) 撤销整个应用，这可能影响其他 Bot。既有聊天引用不会自动删除。
+- 只读工具没有发送邮件、修改日历、删除或共享云文件的能力。授权失效后标记为需要重新授权，网络失败不返回敏感原始响应。
+
 ## 已实现
 
 ### 围绕资料持续对话（v0.4）
@@ -109,7 +142,7 @@ v0.2 直接兼容 v0.1 SQLite 表结构和 UTC 时间格式，**不清空旧数�
 
 备份应停止服务后复制整个 `data/` 和 `workspace/`，或使用 SQLite backup API。不要只复制运行中的 SQLite 主文件而遗漏 WAL。
 
-本版本只支持单用户、单进程本机使用，不要启动多个 Uvicorn Worker，也不要直接暴露公网。工作目录及同机进程应可信；这不是 VM 沙箱。尚无联网搜索、浏览器控制、邮件、支付、任意 Shell 或重复日程能力。
+本版本只支持单用户、单进程本机使用，不要启动多个 Uvicorn Worker，也不要直接暴露公网。工作目录及同机进程应可信；这不是 VM 沙箱。尚无通用联网搜索、浏览器控制、邮件发送、支付、任意 Shell 或重复日程能力。Google 邮件阅读需另行授权。
 
 ## 测试
 
