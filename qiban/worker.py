@@ -6,6 +6,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .agent import run_agent
+from .routines import Routines, complete, run_briefing
 from .storage import now, timestamp
 
 
@@ -40,7 +41,10 @@ def acquire(store):
         )
 
 
-async def process_one(store, runner=run_agent, timeout=120):
+async def process_one(
+    store, runner=run_agent, timeout=120, briefing_runner=run_briefing
+):
+    Routines(store)
     with store.connect(transaction=True) as db:
         row = db.execute(
             "UPDATE tasks SET status='running',updated_at=? WHERE id=(SELECT id FROM tasks WHERE status='queued' AND due_at<=? ORDER BY due_at LIMIT 1) RETURNING *",
@@ -63,6 +67,8 @@ async def process_one(store, runner=run_agent, timeout=120):
             return f"提醒：{task['prompt']}" + (
                 "\n（服务恢复后补发的提醒）" if late else ""
             )
+        if task["kind"] == "briefing":
+            return await briefing_runner(store, task)
         return await runner(store, task)
 
     work = asyncio.create_task(execute())
@@ -110,6 +116,7 @@ async def process_one(store, runner=run_agent, timeout=120):
             ("failed" if error else "succeeded", result, error, now(), task["id"]),
         ).rowcount
         if changed:
+            complete(db, task["id"], not error)
             db.execute(
                 "INSERT INTO events(task_id,label,detail,created_at) VALUES (?,?,?,?)",
                 (task["id"], "执行失败" if error else "任务完成", error or "", now()),
@@ -137,6 +144,7 @@ async def serve(store):
     beat = asyncio.create_task(heartbeat())
     try:
         while True:
+            Routines(store).tick()
             await process_one(store)
             await asyncio.sleep(0.5)
     finally:

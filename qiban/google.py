@@ -340,11 +340,20 @@ class Google:
                     bid,
                     service,
                     "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-                    {"q": query, "maxResults": 10},
+                    {
+                        "q": query,
+                        "maxResults": 10,
+                        **(
+                            {"pageToken": str(args["page_token"])[:2000]}
+                            if args.get("page_token")
+                            else {}
+                        ),
+                    },
                 )
                 return {
                     "messages": result.get("messages", []),
                     "more_available": bool(result.get("nextPageToken")),
+                    "next_page_token": result.get("nextPageToken"),
                     "note": "最多返回10封；使用 google_read_mail 读取正文。",
                 }
             if name == "google_read_mail":

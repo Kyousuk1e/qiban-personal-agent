@@ -1,6 +1,7 @@
 """FastAPI API and Jinja pages. No client-side JavaScript is required."""
 
 import asyncio
+import json
 import secrets
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from .agent import validate_url
 from .extract import MAX_UPLOAD
 from .files import Files
 from .google import SERVICES, Google
+from .routines import Routines
 from .storage import Store, future, now, text, timestamp
 from .uploads import Uploads
 from .worker import acquire, serve
@@ -39,6 +41,7 @@ def create_app(store=None, start_worker=True):
     uploads = Uploads(store)
     store.create_bot(first=True)
     google = Google(store)
+    routines = Routines(store)
     csrf = secrets.token_urlsafe(32)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
     templates.env.filters["localtime"] = lambda value: (
@@ -209,6 +212,15 @@ def create_app(store=None, start_worker=True):
             "context_files": [],
             "parent": None,
             "last_task": None,
+            "routines": [],
+            "routine": None,
+            "routine_runs": [],
+            "routine_sources": [],
+            "selected_services": [],
+            "routine_missing": [],
+            "unread_briefings": store.all(
+                "SELECT id,title,status FROM tasks WHERE kind='briefing' AND status IN ('succeeded','failed') AND read=0 ORDER BY updated_at DESC LIMIT 50"
+            ),
             "labels": {
                 "queued": "待执行",
                 "running": "执行中",
@@ -438,6 +450,81 @@ def create_app(store=None, start_worker=True):
         bot = store.create_bot()
         return RedirectResponse("/bots/" + bot["id"], status_code=303)
 
+    @app.get("/bots/{bid}/routines")
+    def routines_page(bid: str, request: Request):
+        bot = store.one("SELECT * FROM bots WHERE id=?", (bid,))
+        if not bot:
+            raise ValueError("队友不存在。")
+        rows = store.all(
+            "SELECT * FROM routines WHERE bot_id=? ORDER BY rowid DESC", (bid,)
+        )
+        for row in rows:
+            row["missing"] = routines.missing(row)
+            row["latest"] = store.one(
+                "SELECT t.* FROM tasks t JOIN routine_runs r ON r.task_id=t.id WHERE r.routine_id=? ORDER BY t.rowid DESC LIMIT 1",
+                (row["id"],),
+            )
+        return render(request, "routines", current_bot=bot, routines=rows)
+
+    @app.post("/bots/{bid}/routines")
+    async def create_routine(bid: str, request: Request):
+        form = await request.form()
+        row = routines.save(
+            bid,
+            str(form.get("clock", "")),
+            form.getlist("services"),
+            str(form.get("instructions", "")),
+            form.get("frequency") == "weekdays",
+        )
+        return RedirectResponse("/routines/" + row["id"], status_code=303)
+
+    @app.get("/routines/{rid}")
+    def routine_page(rid: str, request: Request):
+        row = routines.get(rid)
+        history = store.all(
+            "SELECT t.* FROM tasks t JOIN routine_runs r ON r.task_id=t.id WHERE r.routine_id=? ORDER BY t.rowid DESC LIMIT 30",
+            (rid,),
+        )
+        return render(
+            request,
+            "routine",
+            current_bot=store.one("SELECT * FROM bots WHERE id=?", (row["bot_id"],)),
+            routine=row,
+            routine_runs=history,
+            selected_services=json.loads(row["services"]),
+            routine_missing=routines.missing(row),
+        )
+
+    @app.post("/routines/{rid}/save")
+    async def save_routine(rid: str, request: Request):
+        form, row = await request.form(), routines.get(rid)
+        routines.save(
+            row["bot_id"],
+            str(form.get("clock", "")),
+            form.getlist("services"),
+            str(form.get("instructions", "")),
+            form.get("frequency") == "weekdays",
+            rid=rid,
+        )
+        return RedirectResponse("/routines/" + rid, status_code=303)
+
+    @app.post("/routines/{rid}/toggle")
+    def toggle_routine(rid: str):
+        routines.toggle(rid)
+        return RedirectResponse("/routines/" + rid, status_code=303)
+
+    @app.post("/routines/{rid}/run")
+    def run_routine(rid: str):
+        row = routines.get(rid)
+        if routines.missing(row):
+            raise ValueError(
+                "请先连接所选 Google 应用，并在自动简报页面保存配置以确认使用的账号。"
+            )
+        cfg = store.config()
+        if not cfg["baseUrl"] or not cfg["model"]:
+            raise ValueError("请先在设置中配置模型，再试运行简报。")
+        return RedirectResponse("/tasks/" + routines.enqueue(rid), status_code=303)
+
     @app.get("/bots/{bid}")
     def bot_page(bid: str, request: Request):
         bot = store.one("SELECT * FROM bots WHERE id=?", (bid,))
@@ -544,7 +631,19 @@ def create_app(store=None, start_worker=True):
         task = store.one("SELECT * FROM tasks WHERE id=?", (tid,))
         if not task:
             raise ValueError("任务不存在。")
-        return render(request, "task", task=task, events=api_events(tid))
+        run = store.one("SELECT * FROM routine_runs WHERE task_id=?", (tid,))
+        return render(
+            request,
+            "task",
+            task=task,
+            events=api_events(tid),
+            routine=store.one("SELECT * FROM routines WHERE id=?", (run["routine_id"],))
+            if run
+            else None,
+            routine_sources=json.loads(run["sources"])
+            if run and task["status"] == "succeeded"
+            else [],
+        )
 
     @app.post("/tasks")
     async def reminder(request: Request):

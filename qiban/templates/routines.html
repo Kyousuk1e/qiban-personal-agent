@@ -1,0 +1,24 @@
+{% macro routine_fields(row=none) %}
+  <div class="routine-form-grid"><label>运行时间 · 北京时间<input type="time" name="clock" value="{{ row.clock if row else '09:00' }}" required></label><label>重复频率<select name="frequency"><option value="daily">每天</option><option value="weekdays" {% if row and row.weekdays %}selected{% endif %}>周一至周五</option></select></label></div>
+  <fieldset class="routine-services"><legend>这次简报读取什么？</legend><label><input type="checkbox" name="services" value="gmail" {% if not row or 'gmail' in selected_services %}checked{% endif %}> 最近新增邮件</label><label><input type="checkbox" name="services" value="calendar" {% if not row or 'calendar' in selected_services %}checked{% endif %}> 今天的主日历</label></fieldset>
+  <label>你特别关心什么？<textarea name="instructions" maxlength="2000" placeholder="例如：优先列出需要回复的客户邮件、付款截止日期和会议冲突。">{{ row.instructions if row else '' }}</textarea></label>
+{% endmacro %}
+<section class="content-page routines-page">
+{% if page == 'routines' %}
+  <a class="back-link" href="/bots/{{ current_bot.id }}">← {{ current_bot.name }}</a>
+  <div class="page-title"><h1>自动简报</h1><p>让 {{ current_bot.name }} 在约定的时间，把邮件和日程整理好交给你。</p></div>
+  <div class="routine-info"><strong>一次设置，按时交付</strong><p>仅查询你选择的来源。邮件、日程和关注事项会发送至你配置的模型；结果保存到这位队友的专属简报对话，并出现在站内未读提示中。电脑及 Python 服务需要保持运行，离线后只补跑一次，暂停后不补跑。</p><a href="/bots/{{ current_bot.id }}/apps">连接或检查 Google 应用 ↗</a></div>
+  {% for r in routines %}<article class="panel routine-card"><div class="routine-card-heading"><h2>{{ '工作日' if r.weekdays else '每天' }} {{ r.clock }} · 邮件与日程简报</h2><span class="badge {{ 'succeeded' if r.enabled else 'cancelled' }}">{{ '已启用' if r.enabled else '已暂停' }}</span></div><p>{{ r.instructions }}</p>{% if r.missing %}<p class="routine-warning">需要连接或确认 {{ r.missing|join('、') }} 的账号。</p>{% endif %}<small>下次运行：{{ r.next_due|localtime if r.enabled else '暂停中' }} · 北京时间</small>{% if r.latest %}<a class="routine-latest" href="/tasks/{{ r.latest.id }}">最近一次：{{ labels[r.latest.status] }} · {{ r.latest.created_at|localtime }} →</a>{% endif %}<a class="secondary" href="/routines/{{ r.id }}">管理与执行记录 →</a></article>{% else %}<div class="empty">从一份每日简报开始。可以先保存，再连接账号并试跑。</div>{% endfor %}
+  <details class="panel routine-create" {% if not routines %}open{% endif %}><summary>＋ 创建自动简报</summary><form action="/bots/{{ current_bot.id }}/routines" method="post">{{ token() }}{{ routine_fields() }}<button class="primary" {% if not current_bot.configured %}disabled{% endif %}>保存并启用</button>{% if not current_bot.configured %}<p>请先完成队友设定。</p>{% endif %}</form></details>
+{% else %}
+  <a class="back-link" href="/bots/{{ current_bot.id }}/routines">← {{ current_bot.name }}的自动简报</a>
+  <div class="page-title"><h1>邮件与日程简报</h1><p>{{ '工作日' if routine.weekdays else '每天' }} {{ routine.clock }} · 北京时间 · {{ '已启用' if routine.enabled else '已暂停' }}</p></div>
+  {% if routine_missing %}<div class="alert error">请先连接 {{ routine_missing|join('、') }}，再点击下方「保存修改」确认所用账号。<a href="/bots/{{ current_bot.id }}/apps">连接应用 ↗</a></div>{% endif %}
+  <div class="routine-controls"><form action="/routines/{{ routine.id }}/run" method="post">{{ token() }}<button class="primary" {% if routine_missing %}disabled{% endif %}>立即试运行</button></form><form action="/routines/{{ routine.id }}/toggle" method="post">{{ token() }}<button class="secondary">{{ '暂停自动运行' if routine.enabled else '启用自动运行' }}</button></form><a class="secondary" href="/chat/{{ routine.conversation_id }}">打开简报对话 ↗</a></div>
+  <p class="muted">{% if routine.enabled %}下次运行 {{ routine.next_due|localtime }}。{% endif %}暂停只停止后续定时运行，已排队或执行中的任务可在详情中取消。试运行会真实读取资料并消耗模型额度。</p>
+  <details class="panel"><summary>修改时间、来源和关注事项</summary><form action="/routines/{{ routine.id }}/save" method="post">{{ token() }}{{ routine_fields(routine) }}<button class="primary">保存修改</button><p class="muted">执行期间不能修改。修改来源或授权账号后，会重新从最近 24 小时开始整理。</p></form></details>
+  <div class="section-label">最近 30 次执行 · <a href="/routines/{{ routine.id }}">刷新状态</a></div>
+  {% for t in routine_runs %}<a class="task-row" href="/tasks/{{ t.id }}"><div class="task-icon">◷</div><div><strong>{{ t.created_at|localtime }}</strong><small>{{ t.error if t.error else ('结果未读' if t.status == 'succeeded' and not t.read else '查看结果与执行过程') }}</small></div><span class="badge {{ t.status }}">{{ labels[t.status] }}</span><span>›</span></a>{% else %}<div class="empty">还没有执行记录。先试运行一次，确认简报符合你的需要。</div>{% endfor %}
+{% endif %}
+  <p class="routine-footnote">当前仅支持只读邮件与主日历，不读取邮件附件。首次查最近 24 小时，后续从成功水位继续，最长补查 7 天；每次最多读 10 封新邮件、扫描 100 个邮件 ID、查看 30 条日程。成功后记录已报告邮件，避免重复。失败或取消不推进记录，失败后可点击「重试简报」；重试会按当前时间和最新配置重新查询。日历每天重新查看，方便你掌握当天完整安排。仅提供站内提醒，需打开或刷新助手查看。</p>
+</section>

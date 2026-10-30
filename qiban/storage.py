@@ -373,4 +373,16 @@ class Store:
                     (table,),
                 ).fetchone():
                     db.execute(f"DELETE FROM {table} WHERE bot_id=?", (bid,))
+            if db.execute(
+                "SELECT name FROM sqlite_master WHERE name='routines'"
+            ).fetchone():
+                db.execute(
+                    "DELETE FROM routine_seen WHERE routine_id IN (SELECT id FROM routines WHERE bot_id=?)",
+                    (bid,),
+                )
+                db.execute(
+                    "DELETE FROM routine_runs WHERE routine_id IN (SELECT id FROM routines WHERE bot_id=?)",
+                    (bid,),
+                )
+                db.execute("DELETE FROM routines WHERE bot_id=?", (bid,))
             db.execute("DELETE FROM bots WHERE id=?", (bid,))
